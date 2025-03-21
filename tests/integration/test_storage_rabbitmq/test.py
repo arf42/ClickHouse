@@ -25,7 +25,6 @@ cluster = ClickHouseCluster(__file__)
 instance = cluster.add_instance(
     "instance",
     main_configs=[
-        "configs/rabbitmq.xml",
         "configs/macros.xml",
         "configs/named_collection.xml",
     ],
@@ -44,7 +43,6 @@ instance3 = cluster.add_instance(
     "instance3",
     user_configs=["configs/users.xml"],
     main_configs=[
-        "configs/rabbitmq.xml",
         "configs/macros.xml",
         "configs/named_collection.xml",
         "configs/mergetree.xml",
@@ -4037,13 +4035,13 @@ def test_hiding_credentials(rabbitmq_cluster):
             SETTINGS rabbitmq_host_port = '{rabbitmq_cluster.rabbitmq_host}:{cluster.rabbitmq_port}',
                      rabbitmq_exchange_name = '{table_name}',
                      rabbitmq_format = 'JSONEachRow',
-                     rabbitmq_username = 'clickhouse',
-                     rabbitmq_password = 'rabbitmq',
-                     rabbitmq_address = 'amqp://root:clickhouse@rabbitmq1:5672/';
+                     rabbitmq_username = '{rabbitmq_username}',
+                     rabbitmq_password = '{rabbitmq_password}',
+                     rabbitmq_address='amqp://{rabbitmq_username}:{urllib.parse.quote_plus(rabbitmq_password)}@rabbitmq1:5672/';
         """
     )
 
     instance.query("SYSTEM FLUSH LOGS")
     message = instance.query(f"SELECT message FROM system.text_log WHERE message ILIKE '%CREATE TABLE test.{table_name}%'")
     assert "rabbitmq_password = \\'[HIDDEN]\\'" in  message
-    assert "rabbitmq_address = \\'amqp://root:[HIDDEN]@rabbitmq1:5672/\\'" in  message
+    assert f"rabbitmq_address = \\'amqp://{rabbitmq_username}:[HIDDEN]@rabbitmq1:5672/\\'" in  message
