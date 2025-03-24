@@ -71,22 +71,18 @@ public:
 
     struct PhysicalJoinNode
     {
-        ActionsDAGPtr actions;
+        ActionsDAGPtr actions{nullptr};
         JoinActionRef filter{nullptr};
 
-        JoinPtr join_strategy;
+        JoinPtr join_strategy = nullptr;
+        int input_idx = -1;
 
         BaseRelsSet left_child;
         BaseRelsSet right_child;
     };
 
-    struct PhysicalJoinTree
-    {
-        BaseRelsSet root;
-        std::unordered_map<BaseRelsSet, PhysicalJoinNode> nodes;
-    };
-
-    PhysicalJoinTree convertToPhysical(
+    std::vector<JoinStepLogical::PhysicalJoinNode>
+    convertToPhysical(
         bool is_explain_logical,
         UInt64 max_threads,
         UInt64 max_entries_for_hash_table_stats,
@@ -97,7 +93,6 @@ public:
 
     const JoinSettings & getSettings() const { return join_settings; }
     bool useNulls() const { return use_nulls; }
-
 
     void setHashTableCacheKey(UInt64 hash_table_key_hash_, size_t idx);
 

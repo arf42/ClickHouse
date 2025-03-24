@@ -16,7 +16,6 @@
 #include <Interpreters/HashJoin/HashJoin.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Storages/StorageJoin.h>
-#include <ranges>
 #include <Core/Settings.h>
 #include <Functions/FunctionFactory.h>
 #include <Interpreters/PasteJoin.h>
@@ -30,6 +29,10 @@
 #include <Functions/IFunctionAdaptors.h>
 #include <Functions/IsOperation.h>
 #include <Functions/tuple.h>
+
+
+#include <ranges>
+#include <stack>
 
 
 namespace DB
@@ -99,9 +102,9 @@ String formatJoinCondition(const JoinCondition & join_condition)
 namespace
 {
 
-auto bitSetToList(BaseRelsSet s)
+auto bitsetToPositions(BaseRelsSet s)
 {
-    return std::views::iota(0u, s.size()) | std::views::filter([&](size_t i) { return s.test(i); });
+    return std::views::iota(0u, s.size()) | std::views::filter([=](size_t i) { return s.test(i); });
 }
 
 bool isSubsetOf(BaseRelsSet lhs, BaseRelsSet rhs)
@@ -252,7 +255,7 @@ void JoinStepLogical::describeJoinActionsImpl(ResultType & result) const
         {
             if (!actions)
                 continue;
-            description.add(fmt::format("Actions[{}]", fmt::join(bitSetToList(inputs), ", ")), ExpressionActions(actions->clone()));
+            description.add(fmt::format("Actions[{}]", fmt::join(bitsetToPositions(inputs), ", ")), ExpressionActions(actions->clone()));
         }
     }
 
@@ -727,12 +730,11 @@ void forEachJoinAction(JoinExpression & join_expression, F && f)
 
 void buildPhysicalJoinNode(
     JoinStepLogical::PhysicalJoinNode & result_node,
-    JoinStepLogical::PhysicalJoinTree & join_tree,
+    const std::unordered_map<BaseRelsSet, JoinStepLogical::PhysicalJoinNode> & join_tree,
     JoinOperator & join_info,
     JoinPlanningContext & join_context,
     bool is_explain_logical)
 {
-
     auto left_rels = result_node.left_child;
     auto right_rels = result_node.right_child;
 
@@ -740,16 +742,16 @@ void buildPhysicalJoinNode(
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Left and right tables are intersected: {} <-> {}", left_rels.to_ullong(), right_rels.to_ullong());
 
     LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: JOINIGN: [{}] <-> [{}]", __FILE__, __LINE__,
-        fmt::join(bitSetToList(result_node.left_child), ","),
-        fmt::join(bitSetToList(result_node.right_child), ","));
+        fmt::join(bitsetToPositions(result_node.left_child), ","),
+        fmt::join(bitsetToPositions(result_node.right_child), ","));
 
     auto * post_join_actions = result_node.actions.get();
-    auto * left_pre_join_actions = join_tree.nodes.at(result_node.left_child).actions.get();
-    auto * right_pre_join_actions = join_tree.nodes.at(result_node.right_child).actions.get();
+    auto * left_pre_join_actions = join_tree.at(result_node.left_child).actions.get();
+    auto * right_pre_join_actions = join_tree.at(result_node.right_child).actions.get();
 
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > post_join_actions {}", __FILE__, __LINE__, post_join_actions->dumpDAG());
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > left_pre_join_actions {}", __FILE__, __LINE__, left_pre_join_actions->dumpDAG());
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > right_pre_join_actions {}", __FILE__, __LINE__, right_pre_join_actions->dumpDAG());
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > post_join_actions\n{}", __FILE__, __LINE__, post_join_actions->dumpDAG());
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > left_pre_join_actions\n{}", __FILE__, __LINE__, left_pre_join_actions->dumpDAG());
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > right_pre_join_actions\n{}", __FILE__, __LINE__, right_pre_join_actions->dumpDAG());
     forEachJoinAction(join_info.expression, [&](JoinActionRef & action)
     {
         if (action.canBeCalculated(result_node.left_child))
@@ -776,13 +778,25 @@ void buildPhysicalJoinNode(
         else
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot determine actions source: left {}, right{}, actions {} {}",
                 result_node.left_child.to_ullong(), result_node.right_child.to_ullong(), src.to_ullong(), actions->dumpNames());
-        join_actions->mergeInplace(std::move(*actions));
+        LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: merge inplase\n{}", __FILE__, __LINE__, join_actions->dumpDAG());
+        LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: from\n{}", __FILE__, __LINE__, actions->dumpDAG());
+
+
+        ActionsDAG::NodeRawConstPtrs new_outputs;
+        join_actions->mergeNodes(std::move(*actions), &new_outputs);
+
+        auto & existing_outputs = join_actions->getOutputs();
+        for (const auto * node : new_outputs)
+        {
+            if (!std::ranges::contains(existing_outputs, node))
+                existing_outputs.push_back(node);
+        }
     }
     join_info.expression_actions.actions.clear();
 
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> post_join_actions {}", __FILE__, __LINE__, post_join_actions->dumpDAG());
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> left_pre_join_actions {}", __FILE__, __LINE__, left_pre_join_actions->dumpDAG());
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> right_pre_join_actions {}", __FILE__, __LINE__, right_pre_join_actions->dumpDAG());
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> post_join_actions\n{}", __FILE__, __LINE__, post_join_actions->dumpDAG());
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> left_pre_join_actions\n{}", __FILE__, __LINE__, left_pre_join_actions->dumpDAG());
+    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> right_pre_join_actions\n{}", __FILE__, __LINE__, right_pre_join_actions->dumpDAG());
 
     auto & join_expression = join_info.expression;
     auto & table_join = join_context.table_join;
@@ -996,7 +1010,49 @@ struct JoinEdge
     JoinOperator join_operator;
 };
 
-JoinStepLogical::PhysicalJoinTree JoinStepLogical::convertToPhysical(
+
+static size_t getSingleBit(BaseRelsSet set)
+{
+    chassert(set.count() == 1);
+    return std::countr_zero(set.to_ullong());
+}
+
+
+std::vector<JoinStepLogical::PhysicalJoinNode> buildOperationStack(
+    BaseRelsSet root, std::unordered_map<BaseRelsSet, JoinStepLogical::PhysicalJoinNode> tree)
+{
+    std::vector<JoinStepLogical::PhysicalJoinNode> nodes;
+    nodes.reserve(tree.size());
+
+    /// Stack for traversal
+    std::stack<BaseRelsSet> nodeStack;
+    nodeStack.push(root);
+
+    /// Build operations in reverse post-order
+    while (!nodeStack.empty())
+    {
+        BaseRelsSet current = nodeStack.top();
+        nodeStack.pop();
+
+        auto node = std::move(tree.at(current));
+
+        /// In post-order, we want LEFT -> RIGHT -> NODE
+        /// Since we're using a stack (LIFO), we push RIGHT then LEFT
+        if (!node.right_child.none())
+            nodeStack.push(node.right_child);
+
+        if (!node.left_child.none())
+            nodeStack.push(node.left_child);
+
+        nodes.push_back(std::move(node));
+    }
+
+    std::reverse(nodes.begin(), nodes.end());
+    return nodes;
+}
+
+std::vector<JoinStepLogical::PhysicalJoinNode>
+JoinStepLogical::convertToPhysical(
     bool is_explain_logical,
     UInt64 max_threads,
     UInt64 max_entries_for_hash_table_stats,
@@ -1004,6 +1060,7 @@ JoinStepLogical::PhysicalJoinTree JoinStepLogical::convertToPhysical(
     std::chrono::milliseconds lock_acquire_timeout,
     const ExpressionActionsSettings & actions_settings)
 {
+    size_t num_tables = getNumberOfTables();
     std::vector<JoinEdge> join_order;
     for (size_t i = 0; i < join_operators.size(); ++i)
     {
@@ -1013,7 +1070,12 @@ JoinStepLogical::PhysicalJoinTree JoinStepLogical::convertToPhysical(
             std::move(join_operators[i])});
     }
 
-    PhysicalJoinTree physical_tree;
+    std::unordered_map<BaseRelsSet, PhysicalJoinNode> tree;
+    for (size_t i = 0; i < num_tables; ++i)
+    {
+        const auto & [entry, _] = tree.emplace(1u << i, PhysicalJoinNode());
+        entry->second.input_idx = static_cast<int>(i);
+    }
 
     std::vector<ColumnsWithTypeAndName> current_headers;
     for (const auto & header : input_headers)
@@ -1025,7 +1087,7 @@ JoinStepLogical::PhysicalJoinTree JoinStepLogical::convertToPhysical(
 
         for (auto src : {join_edge.lhs, join_edge.rhs})
         {
-            auto & child_node = physical_tree.nodes[src];
+            auto & child_node = tree[src];
             if (src.count() == 1)
             {
                 child_node.actions = std::move(join_edge.join_operator.expression_actions.getActions(src, current_headers));
@@ -1034,14 +1096,14 @@ JoinStepLogical::PhysicalJoinTree JoinStepLogical::convertToPhysical(
             }
         }
 
-        auto & physical_node = physical_tree.nodes[join_edge.lhs | join_edge.rhs];
+        auto & physical_node = tree[join_edge.lhs | join_edge.rhs];
         physical_node.left_child = join_edge.lhs;
         physical_node.right_child = join_edge.rhs;
 
         ColumnsWithTypeAndName current_step_inputs;
         for (auto child : {join_edge.lhs, join_edge.rhs})
         {
-            for (const auto * col : physical_tree.nodes[child].actions->getOutputs())
+            for (const auto * col : tree[child].actions->getOutputs())
             {
                 if (required_output_columns.contains(col->result_name))
                 {
@@ -1050,7 +1112,6 @@ JoinStepLogical::PhysicalJoinTree JoinStepLogical::convertToPhysical(
                      || (child == join_edge.rhs && (join_edge.join_operator.kind == JoinKind::Left || join_edge.join_operator.kind == JoinKind::Full)))
                         column.type = JoinCommon::convertTypeToNullable(column.type);
                     current_step_inputs.push_back(std::move(column));
-
                 }
             }
         }
@@ -1083,15 +1144,15 @@ JoinStepLogical::PhysicalJoinTree JoinStepLogical::convertToPhysical(
 
         if (join_edge.rhs.count() == 1)
         {
-            size_t pos = std::countr_zero(join_edge.rhs.to_ullong());
+            size_t pos = getSingleBit(join_edge.rhs);
             if (hash_table_key_hashes.size() > pos)
                 join_context.hash_table_key_hash = hash_table_key_hashes.at(pos);
         }
 
-        buildPhysicalJoinNode(physical_node, physical_tree, join_edge.join_operator, join_context, is_explain_logical);
+        buildPhysicalJoinNode(physical_node, tree, join_edge.join_operator, join_context, is_explain_logical);
     }
 
-    return physical_tree;
+    return buildOperationStack(BaseRelsSet((1u << num_tables) - 1), std::move(tree));
 }
 
 bool JoinStepLogical::hasPreparedJoinStorage() const

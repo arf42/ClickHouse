@@ -17,9 +17,9 @@ namespace DB
 class BaseRelsSet : public std::bitset<64>
 {
 public:
-    BaseRelsSet(UInt64 value) : std::bitset<64>(value) {}
-    BaseRelsSet() : std::bitset<64>(0) {}
-    BaseRelsSet(const std::bitset<64> & value) : std::bitset<64>(value) {}
+    BaseRelsSet() = default;
+    BaseRelsSet(UInt64 value) : std::bitset<64>(value) {} /// NOLINT
+    BaseRelsSet(const std::bitset<64> & value) : std::bitset<64>(value) {} /// NOLINT
 };
 
 }
