@@ -13,12 +13,12 @@ insert into values_01564 values ('f'); -- { error CANNOT_PARSE_TEXT }
 select nonexistent column; -- { serverError UNKNOWN_IDENTIFIER }
 
 -- syntax error hint after broken insert values
-insert into values_01564 this is bad syntax values ('f'); -- { error SYNTAX_ERROR }
+insert into values_01564 this is bad syntax values ('f'); -- { clientError SYNTAX_ERROR }
 
-insert into values_01564 this is bad syntax values ('f'); -- { error SYNTAX_ERROR }
+insert into values_01564 this is bad syntax values ('f'); -- { clientError SYNTAX_ERROR }
 select 1;
 
-insert into values_01564 this is bad syntax values ('f'); -- { error SYNTAX_ERROR }
+insert into values_01564 this is bad syntax values ('f'); -- { clientError SYNTAX_ERROR }
 select nonexistent column; -- { serverError UNKNOWN_IDENTIFIER }
 
 -- server error hint after broken insert values (violated constraint)
