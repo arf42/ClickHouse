@@ -40,6 +40,8 @@ void CountingTransform::onConsume(Chunk chunk)
         progress_callback(local_progress);
 
     cur_chunk = std::move(chunk);
+
+    LOG_DEBUG(getLogger("CountingTransform"), "Done");
 }
 
 }

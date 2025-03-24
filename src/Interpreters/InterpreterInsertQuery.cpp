@@ -466,6 +466,10 @@ QueryPipeline InterpreterInsertQuery::buildInsertSelectPipeline(ASTInsertQuery &
         return std::make_shared<MaterializingTransform>(in_header, !table->supportsSparseSerialization());
     });
 
+    size_t num_select_threads = pipeline.getNumThreads();
+
+    pipeline.resize(1);
+
     pipeline.addSimpleTransform([&](const Block & in_header) -> ProcessorPtr
     {
         auto context_ptr = getContext();
@@ -475,10 +479,6 @@ QueryPipeline InterpreterInsertQuery::buildInsertSelectPipeline(ASTInsertQuery &
 
         return counting;
     });
-
-    size_t num_select_threads = pipeline.getNumThreads();
-
-    pipeline.resize(1);
 
     if (shouldAddSquashingForStorage(table))
     {

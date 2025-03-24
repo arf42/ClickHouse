@@ -18,6 +18,7 @@
 #include <Interpreters/InterpreterSelectQuery.h>
 #include <Interpreters/InterpreterSelectQueryAnalyzer.h>
 #include <Interpreters/QueryViewsLog.h>
+#include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/Context.h>
 #include <Processors/Sinks/SinkToStorage.h>
 #include <Processors/Transforms/DeduplicationTokenTransforms.h>
@@ -31,6 +32,9 @@
 #include <Processors/Executors/PullingAsyncPipelineExecutor.h>
 #include <Parsers/ASTFunction.h>
 #include <Parsers/ASTInsertQuery.h>
+#include <Parsers/ASTConstraintDeclaration.h>
+#include <Parsers/ASTLiteral.h>
+#include <Parsers/ASTIdentifier.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <QueryPipeline/QueryPlanResourceHolder.h>
 
