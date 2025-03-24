@@ -831,7 +831,7 @@ void TCPHandler::runImpl()
                 if (!query_state->read_all_data)
                     skipData(query_state.value());
 
-                LOG_TEST(log, "Logs and exception has been sent. The connection is preserved.");
+                LOG_DEBUG(log, "Logs and exception has been sent. The connection is preserved.");
             }
             catch (...)
             {
@@ -948,7 +948,7 @@ bool TCPHandler::receivePacketsExpectData(QueryState & state)
 
     while (!server.isCancelled() && tcp_server.isOpen())
     {
-        if (!in->poll(timeout_us))
+        while (!in->poll(timeout_us))
         {
             size_t elapsed = size_t(watch.elapsedSeconds());
             if (elapsed > size_t(receive_timeout.totalSeconds()))
@@ -958,6 +958,11 @@ bool TCPHandler::receivePacketsExpectData(QueryState & state)
                                 elapsed, receive_timeout.totalSeconds());
             }
         }
+
+        /// it is OK to get EOF when server tries to skip the data in case of exception.
+        /// Server has send exception or EOF to the client, client is able not to send any data after that.
+        if (state.skipping_data && !in->hasPendingData())
+            return false;
 
         UInt64 packet_type = 0;
         readVarUInt(packet_type, *in);
@@ -1120,7 +1125,9 @@ void TCPHandler::processInsertQuery(QueryState & state)
 
             while (receivePacketsExpectDataConcurrentWithExecutor(state))
             {
+                LOG_DEBUG(log, "processInsertQuery");
                 executor.push(std::move(state.block_for_insert));
+                LOG_DEBUG(log, "processInsertQuery pushed");
 
                 sendLogs(state);
                 sendInsertProfileEvents(state);

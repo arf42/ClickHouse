@@ -47,7 +47,9 @@ void CancellationChecker::cancelTask(QueryToTrack task)
     if (task.query)
     {
         if (task.overflow_mode == OverflowMode::THROW)
+        {
             task.query->cancelQuery(CancelReason::TIMEOUT);
+        }
         else
             task.query->checkTimeLimit();
     }
@@ -122,8 +124,14 @@ void CancellationChecker::workerFunction()
 
             if ((end_time_ms <= now_ms && duration_milliseconds.count() != 0))
             {
-                LOG_TRACE(log, "Cancelling the task because of the timeout: {} ms, query: {}", duration, next_task.query->getInfo().query);
+                LOG_TRACE(log, "Cancelling the task because of the timeout: {} ms, query_id: {}, query: {}",
+                    duration, next_task.query->getClientInfo().current_query_id, next_task.query->getInfo().query);
+
                 cancelTask(next_task);
+
+                LOG_TRACE(log, "query_id: {} mode {}",
+                    next_task.query->getClientInfo().current_query_id, uint8_t(next_task.overflow_mode));
+
                 querySet.erase(next_task);
 
                 continue;

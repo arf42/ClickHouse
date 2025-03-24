@@ -1,5 +1,6 @@
 #include <IO/WriteBufferFromString.h>
 #include "Common/ISlotControl.h"
+#include "Common/StackTrace.h"
 #include <Common/ThreadPool.h>
 #include <Common/CurrentThread.h>
 #include <Common/CurrentMetrics.h>
@@ -87,6 +88,8 @@ const Processors & PipelineExecutor::getProcessors() const
 
 void PipelineExecutor::cancel(ExecutionStatus reason)
 {
+    LOG_DEBUG(log, "cancel with reason {}", reason);
+
     /// It is allowed to cancel not started query by user.
     if (reason == ExecutionStatus::CancelledByUser)
         tryUpdateExecutionStatus(ExecutionStatus::NotStarted, reason);
@@ -107,7 +110,11 @@ void PipelineExecutor::cancelReading()
 
 void PipelineExecutor::finish()
 {
+    LOG_DEBUG(log, "finish begin");
+
     tasks.finish();
+
+    LOG_DEBUG(log, "finish end");
 }
 
 bool PipelineExecutor::tryUpdateExecutionStatus(ExecutionStatus expected, ExecutionStatus desired)
@@ -188,6 +195,9 @@ bool PipelineExecutor::checkTimeLimitSoft()
     if (process_list_element)
     {
         bool continuing = process_list_element->checkTimeLimitSoft();
+
+        LOG_DEBUG(log, "checkTimeLimitSoft continuing {}", continuing);
+
         // We call cancel here so that all processors are notified and tasks waken up
         // so that the "break" is faster and doesn't wait for long events
         if (!continuing)
@@ -202,6 +212,9 @@ bool PipelineExecutor::checkTimeLimitSoft()
 bool PipelineExecutor::checkTimeLimit()
 {
     bool continuing = checkTimeLimitSoft();
+
+    LOG_DEBUG(log, "checkTimeLimit at continuing {}", continuing);
+
     if (!continuing)
         process_list_element->checkTimeLimit(); // Will throw if needed
 
@@ -215,6 +228,8 @@ void PipelineExecutor::setReadProgressCallback(ReadProgressCallbackPtr callback)
 
 void PipelineExecutor::finalizeExecution()
 {
+    LOG_DEBUG(log, "finalizeExecution begin  execution_status: {} at {}",  execution_status.load(), StackTrace().toString());
+
     checkTimeLimit();
 
     auto status = execution_status.load();
@@ -255,6 +270,8 @@ void PipelineExecutor::finalizeExecution()
 
     if (!all_processors_finished)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Pipeline stuck. Current state:\n{}", dumpPipeline());
+
+    LOG_DEBUG(log, "finalizeExecution end");
 }
 
 void PipelineExecutor::executeSingleThread(size_t thread_num)
@@ -429,32 +446,29 @@ void PipelineExecutor::executeImpl(size_t num_threads, bool concurrency_control)
 {
     initializeExecution(num_threads, concurrency_control);
 
-    bool finished_flag = false;
+    LOG_DEBUG(log, "execute with {}", num_threads);
 
-    SCOPE_EXIT_SAFE(
-        if (!finished_flag)
+    try
+    {
+        if (num_threads > 1)
         {
-            /// If finished_flag is not set, there was an exception.
-            /// Cancel execution in this case.
-            cancel(ExecutionStatus::Exception);
-            if (pool)
-                pool->wait();
+            spawnThreads(); // start at least one thread
+            tasks.processAsyncTasks();
+            pool->wait();
         }
-    );
-
-    if (num_threads > 1)
-    {
-        spawnThreads(); // start at least one thread
-        tasks.processAsyncTasks();
-        pool->wait();
+        else
+        {
+            auto slot = cpu_slots->tryAcquire();
+            executeSingleThread(0);
+        }
     }
-    else
+    catch (...)
     {
-        auto slot = cpu_slots->tryAcquire();
-        executeSingleThread(0);
+        cancel(ExecutionStatus::Exception);
+        if (pool)
+            pool->wait();
+        throw;
     }
-
-    finished_flag = true;
 }
 
 String PipelineExecutor::dumpPipeline() const

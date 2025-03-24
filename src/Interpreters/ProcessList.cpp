@@ -10,6 +10,7 @@
 #include <Parsers/queryNormalization.h>
 #include <Processors/Executors/PipelineExecutor.h>
 #include <base/scope_guard.h>
+#include "Common/Logger.h"
 #include <Common/Exception.h>
 #include <Common/CurrentThread.h>
 #include <Common/logger_useful.h>
@@ -553,6 +554,8 @@ void QueryStatus::removePipelineExecutor(PipelineExecutor * e)
 
 bool QueryStatus::checkTimeLimit()
 {
+    LOG_DEBUG(getLogger("QueryStatus"), "checkTimeLimit at continuing {}", overflow_mode);
+
     auto elapsed_ns = watch.elapsed();
     throwProperExceptionIfNeeded(limits.max_execution_time.totalMilliseconds(), elapsed_ns);
 
