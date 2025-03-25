@@ -43,6 +43,7 @@
 #include <Core/Settings.h>
 #include "Common/CurrentThread.h"
 #include "Common/DateLUT.h"
+#include "Common/Exception.h"
 #include "Common/Logger.h"
 #include "Common/ThreadStatus.h"
 #include <Access/Common/AccessType.h>
@@ -133,6 +134,24 @@ namespace ErrorCodes
     extern const int UNKNOWN_TABLE;
     extern const int LOGICAL_ERROR;
     extern const int TOO_DEEP_RECURSION;
+}
+
+
+static std::exception_ptr addStorageToException(std::exception_ptr ptr, const StorageID & storage)
+{
+    try
+    {
+        std::rethrow_exception(ptr);
+    }
+    catch (DB::Exception & exception)
+    {
+        exception.addMessage("while pushing to view {}", storage.getNameForLogs());
+        return std::current_exception();
+    }
+    catch (...)
+    {
+        return std::current_exception();
+    }
 }
 
 
@@ -296,11 +315,14 @@ public:
 
             if (!status.exception)
                 status.exception = addStorageToException(data.exception, status.view_id);
+
             if (!first_exception)
                 first_exception = status.exception;
 
             if (!views_manager->materialized_views_ignore_errors)
             {
+                tryLogException(status.exception, getLogger("FinalizingViewsTransform"),
+                    "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.");
                 return Status::Ready;
             }
 
@@ -318,14 +340,16 @@ public:
     {
         for (auto & status : statuses)
         {
-            if (status.exception && views_manager->materialized_views_ignore_errors)
-                tryLogException(status.exception, getLogger("FinalizingViewsTransform"),
-                "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.");
+            LOG_DEBUG(getLogger("FinalizingViewsTransform"), "view_id: {}, exception: {} finished {}", status.view_id, bool(status.exception), status.is_finished);
 
             if (status.is_finished)
+            {
                 views_manager->logQueryView(status.view_id, status.exception);
+            }
             else
+            {
                 views_manager->logQueryView(status.view_id, first_exception);
+            }
         }
 
         statuses.clear();
@@ -355,23 +379,6 @@ private:
         catch (...)
         {
             return {false, e};
-        }
-    }
-
-    static std::exception_ptr addStorageToException(std::exception_ptr ptr, const StorageID & storage)
-    {
-        try
-        {
-            std::rethrow_exception(ptr);
-        }
-        catch (DB::Exception & exception)
-        {
-            exception.addMessage("while pushing to view {}", storage.getNameForLogs());
-            return std::current_exception();
-        }
-        catch (...)
-        {
-            return std::current_exception();
         }
     }
 
@@ -611,6 +618,8 @@ ViewsManager::ViewsManager(StoragePtr table, ASTPtr query, Block insert_header,
 
     materialized_views_ignore_errors = init_context->getSettingsRef()[Setting::materialized_views_ignore_errors];
 
+    LOG_DEBUG(logger, "init_table_id {}, deduplicate_blocks_in_dependent_materialized_views {}, insert_null_as_default {}, materialized_views_ignore_errors {}", init_table_id, deduplicate_blocks_in_dependent_materialized_views, insert_null_as_default, materialized_views_ignore_errors);
+
     buildRelaitions();
 }
 
@@ -638,102 +647,130 @@ Chain ViewsManager::createPostSink() const
 }
 
 
-void ViewsManager::buildRelaitions()
+bool ViewsManager::registerPath(VisitedPath path)
 {
-    LOG_DEBUG(logger, "buildRelaitions: {}", init_table_id);
+    auto parent = path.parent();
+    auto current = path.current();
+    LOG_DEBUG(logger, "register_path: {}", path.debugString());
 
-    LOG_DEBUG(logger, "init header {}", init_header.dumpStructure());
-
-    class VisitedPath
+    auto storage = current == init_table_id ? init_storage : DatabaseCatalog::instance().tryGetTable(current, init_context);
+    if (!storage)
     {
-        std::vector<StorageIDPrivate> path;
-        std::set<StorageIDPrivate> visited;
+        if (current == init_table_id)
+            throw Exception(
+                ErrorCodes::UNKNOWN_TABLE,
+                "Target table '{}' doesn't exists.",
+                init_table_id);
 
-        StorageIDPrivate empty_id = {};
+        if (parent == init_table_id)
+            throw Exception(
+                ErrorCodes::UNKNOWN_TABLE,
+                "Target table '{}' of view '{}' doesn't exists.",
+                current, init_table_id);
 
-    public:
-        void pushBack(StorageIDPrivate id)
+        if (parent)
         {
-            if (visited.contains(id))
-                throw Exception(ErrorCodes::TOO_DEEP_RECURSION,
-                    "Dependencies of the table {} are cyclic. Cycle is {}", path.front(), fmt::join(path, " :-> "));
-
-            path.push_back(id);
-            visited.insert(id);
-        }
-
-        void popBack()
-        {
-            visited.erase(path.back());
-            path.pop_back();
-        }
-
-
-        [[maybe_unused]] bool empty() const { return path.empty(); }
-        const StorageIDPrivate & back() const { return path.back(); }
-        const StorageIDPrivate & current() const { return back(); }
-        const StorageIDPrivate & parent() const { if (path.size() > 1) return *++path.rbegin(); return empty_id; }
-        const StorageIDPrivate & prevParent() const { if (path.size() > 2) return *++++path.rbegin(); return empty_id; }
-        const StorageIDPrivate & prevPrevParent() const { if (path.size() > 3) return *++++++path.rbegin(); return empty_id; }
-        String debugString() const { return fmt::format("{}", fmt::join(path, " :-> ")); }
-    };
-
-    auto register_path = [&] (const VisitedPath & path)
-    {
-        auto parent = path.parent();
-        auto current = path.current();
-        LOG_DEBUG(logger, "register_path: {}", path.debugString());
-
-        auto storage = current == init_table_id ? init_storage : DatabaseCatalog::instance().tryGetTable(current, init_context);
-        if (!storage)
-        {
-            if (current == init_table_id)
-                throw Exception(
-                    ErrorCodes::UNKNOWN_TABLE,
-                    "Target table '{}' doesn't exists.",
-                    init_table_id);
-
-            if (parent == init_table_id)
-                throw Exception(
-                    ErrorCodes::UNKNOWN_TABLE,
-                    "Target table '{}' of view '{}' doesn't exists.",
-                    current, init_table_id);
-
-            if (parent)
+            if (init_context->getSettingsRef()[Setting::ignore_materialized_views_with_dropped_target_table])
             {
-                if (init_context->getSettingsRef()[Setting::ignore_materialized_views_with_dropped_target_table])
-                    return false;
-
-                throw Exception(
-                    ErrorCodes::UNKNOWN_TABLE,
-                    "Target table '{}' of view '{}' doesn't exists. To ignore this view use setting "
-                    "ignore_materialized_views_with_dropped_target_table",
-                    current, parent);
+                LOG_ERROR(getLogger("FinalizingViewsTransform"),
+                    "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled. Target table '{}' of view '{}' doesn't exists.", current, parent);
+                return false;
             }
+
+            throw Exception(
+                ErrorCodes::UNKNOWN_TABLE,
+                "Target table '{}' of view '{}' doesn't exists. To ignore this view use the setting ignore_materialized_views_with_dropped_target_table",
+                current, parent);
         }
 
-        auto lock = storage->tryLockForShare(init_context->getInitialQueryId(), init_context->getSettingsRef()[Setting::lock_acquire_timeout]);
-        if (lock == nullptr)
+        UNREACHABLE();
+    }
+    LOG_DEBUG(logger, "1");
+
+    auto lock = storage->tryLockForShare(init_context->getInitialQueryId(), init_context->getSettingsRef()[Setting::lock_acquire_timeout]);
+    if (lock == nullptr)
+    {
+        // In case the materialized view is dropped/detached at this point, we register a warning and ignore it
+        assert(storage->is_dropped || storage->is_detached);
+        LOG_WARNING(getLogger("ViewsManager"), "Trying to access table {} but it doesn't exist", current);
+        return false;
+    }
+
+    LOG_DEBUG(logger, "2");
+    auto metadata = storage->getInMemoryMetadataPtr();
+
+    storages[current] = storage;
+    metadata_snapshots[current] = metadata;
+    storage_locks[current] = std::move(lock);
+
+    LOG_DEBUG(logger, "3");
+
+    if (current == init_table_id)
+    {
+        LOG_DEBUG(logger, "33");
+
+        select_queries[{}] = init_query->as<ASTInsertQuery>()->select;
+        select_contexts[{}] = init_context;
+        insert_contexts[{}] = init_context;
+        input_headers[{}] = init_header;
+        thread_groups[{}] = CurrentThread::getGroup();
+        dependent_views[{}] = {};
+    }
+
+    LOG_DEBUG(logger, "4");
+
+
+    if (dynamic_cast<StorageMaterializedView *>(storage.get()))
+    {
+        if (current == init_table_id)
         {
-            // In case the materialized view is dropped/detached at this point, we register a warning and ignore it
-            assert(storage->is_dropped || storage->is_detached);
-            LOG_WARNING(getLogger("ViewsManager"), "Trying to access table {} but it doesn't exist", current);
+            LOG_DEBUG(logger, "66");
+            view_types[current] = QueryViewsLogElement::ViewType::MATERIALIZED;
+            // root is filled at next call register_path
+            return true;
+        }
+
+        LOG_DEBUG(logger, "7");
+
+        const auto & select_table_id = metadata->getSelectQuery().select_table_id;
+        if (select_table_id != path.parent())
+        {
+            /// It may happen if materialize view query was changed and it doesn't depend on this source table anymore.
+            /// See setting `allow_experimental_alter_materialized_view_structure`
+            LOG_DEBUG(logger, "Table '{}' is not a source for view '{}' anymore, current source is '{}'",
+                path.parent(), current, select_table_id);
             return false;
         }
 
-        auto metadata = storage->getInMemoryMetadataPtr();
+        auto select_query = metadata->getSelectQuery().inner_query;
 
-        auto parent_select_context = init_context; // select_contexts.at(parent.view_id);
+        // Block select_header;
+        // // Get list of columns we get from select query.
+        // if (select_context->getSettingsRef()[Setting::allow_experimental_analyzer])
+        //     select_header = InterpreterSelectQueryAnalyzer::getSampleBlock(select_query, select_context, SelectQueryOptions().ignoreAccessCheck());
+        // else
+        //     select_header = InterpreterSelectQuery(select_query, select_context, SelectQueryOptions().ignoreAccessCheck()).getSampleBlock();
+
+        LOG_DEBUG(logger, "8");
+
+        select_queries[current] = select_query;
+        input_headers[current] = output_headers.at(path.prevParent());
+
+        auto parent_select_context = select_contexts.at(path.prevParent());
         auto select_context = metadata->getSQLSecurityOverriddenContext(parent_select_context);
         select_context->setQueryAccessInfo(parent_select_context->getQueryAccessInfoPtr());
         // Processing of blocks for MVs is done block by block, and there will
         // be no parallel reading after (plus it is not a costless operation)
         select_context->setSetting("parallelize_output_from_storages", Field{false});
 
+        LOG_DEBUG(logger, "9");
+
         auto insert_context = Context::createCopy(select_context);
         insert_context->setQueryAccessInfo(parent_select_context->getQueryAccessInfoPtr());
         if (!deduplicate_blocks_in_dependent_materialized_views)
             insert_context->setSetting("insert_deduplicate", Field{false});
+
+        LOG_DEBUG(logger, "10");
 
         const auto & insert_settings = insert_context->getSettingsRef();
         // Separate min_insert_block_size_rows/min_insert_block_size_bytes for children
@@ -742,194 +779,151 @@ void ViewsManager::buildRelaitions()
         if (insert_settings[Setting::min_insert_block_size_bytes_for_materialized_views])
             insert_context->setSetting("min_insert_block_size_bytes", insert_settings[Setting::min_insert_block_size_bytes_for_materialized_views].value);
 
-        storages[current] = storage;
-        metadata_snapshots[current] = metadata;
-        storage_locks[current] = std::move(lock);
 
-        if (dynamic_cast<StorageMaterializedView *>(storage.get()))
+        select_contexts[current] = select_context;
+        insert_contexts[current] = insert_context;
+        // output_headers is filled at next call register_path
+
+        source_tables[current] = parent;
+
+        thread_groups[current] = ThreadGroup::createForMaterializedView();
+
+        view_types[current] = QueryViewsLogElement::ViewType::MATERIALIZED;
+
+        dependent_views[current] = {};
+
+        if (init_context->hasQueryContext())
         {
-            if (current == init_table_id)
-            {
-                select_queries[current] = init_query->as<ASTInsertQuery>()->select;
-
-                select_contexts[current] = init_context;
-                insert_contexts[current] = init_context;
-
-                input_headers[current] = init_header;
-                // output_headers is filled at next call register_path
-
-                thread_groups[current] = CurrentThread::getGroup();
-
-                view_types[current] = QueryViewsLogElement::ViewType::MATERIALIZED;
-
-                LOG_DEBUG(logger, "register_path: dependency {} -> X", current);
-                dependent_views[current] = {};
-
-                // root is filled at next call register_path
-                return true;
-            }
-
-            const auto & select_table_id = metadata->getSelectQuery().select_table_id;
-            if (select_table_id != path.parent())
-            {
-                /// It may happen if materialize view query was changed and it doesn't depend on this source table anymore.
-                /// See setting `allow_experimental_alter_materialized_view_structure`
-                LOG_DEBUG(logger, "Table '{}' is not a source for view '{}' anymore, current source is '{}'",
-                    path.parent(), current, select_table_id);
-                return false;
-            }
-
-            auto select_query = metadata->getSelectQuery().inner_query;
-
-            // Block select_header;
-            // // Get list of columns we get from select query.
-            // if (select_context->getSettingsRef()[Setting::allow_experimental_analyzer])
-            //     select_header = InterpreterSelectQueryAnalyzer::getSampleBlock(select_query, select_context, SelectQueryOptions().ignoreAccessCheck());
-            // else
-            //     select_header = InterpreterSelectQuery(select_query, select_context, SelectQueryOptions().ignoreAccessCheck()).getSampleBlock();
-
-            select_queries[current] = select_query;
-            input_headers[current] = output_headers.at(path.prevParent());
-
-            select_contexts[current] = select_context;
-            insert_contexts[current] = insert_context;
-            // output_headers is filled at next call register_path
-
-            source_tables[current] = parent;
-
-            thread_groups[current] = ThreadGroup::createForMaterializedView();
-
-            view_types[current] = QueryViewsLogElement::ViewType::MATERIALIZED;
-
-            dependent_views[current] = {};
-
-            if (init_context->hasQueryContext())
-            {
-                init_context->getQueryContext()->addViewAccessInfo(current.getFullTableName());
-            }
-
-            return true;
+            init_context->getQueryContext()->addViewAccessInfo(current.getFullTableName());
         }
-        else if (auto * live_view = dynamic_cast<StorageLiveView *>(init_storage.get()))
-        {
-            if (current == init_table_id)
-            {
-                select_queries[current] = init_query->as<ASTInsertQuery>()->select;
-                select_contexts[current] = init_context;
-                insert_contexts[current] = init_context;
-                input_headers[current] = init_header;
-                thread_groups[current] = CurrentThread::getGroup();
-                view_types[current] = QueryViewsLogElement::ViewType::LIVE;
-                root = {init_table_id, init_table_id};
-                dependent_views[current] = {};
-                return true;
-            }
 
-            select_queries[current] = live_view->getInnerQuery();
-            input_headers[current] = output_headers.at(path.prevParent());
-            select_contexts[current] = select_context;
-            insert_contexts[current] = insert_context;
-            thread_groups[current] = ThreadGroup::createForMaterializedView();
+        return true;
+    }
+    else if (auto * live_view = dynamic_cast<StorageLiveView *>(init_storage.get()))
+    {
+        if (current == init_table_id)
+        {
             view_types[current] = QueryViewsLogElement::ViewType::LIVE;
-
-            if (init_context->hasQueryContext())
-            {
-                init_context->getQueryContext()->addViewAccessInfo(init_table_id.getFullTableName());
-                init_context->getQueryContext()->addQueryAccessInfo(init_table_id, /*column_names=*/ {});
-            }
-
-            dependent_views[path.prevParent()].push_back(current);
-
+            root = {init_table_id, init_table_id};
             return true;
         }
-        else if (auto * window_view = dynamic_cast<StorageWindowView *>(init_storage.get()))
-        {
-            if (current == init_table_id)
-            {
-                select_queries[current] = init_query->as<ASTInsertQuery>()->select;
-                select_contexts[current] = init_context;
-                insert_contexts[current] = init_context;
-                input_headers[current] = init_header;
-                thread_groups[current] = CurrentThread::getGroup();
-                view_types[current] = QueryViewsLogElement::ViewType::LIVE;
-                root = {init_table_id, init_table_id};
-                dependent_views[current] = {};
-                return true;
-            }
 
-            select_queries[current] = window_view->getMergeableQuery();
-            select_contexts[current] = select_context;
-            insert_contexts[current] = insert_context;
-            input_headers[current] = output_headers.at(path.prevParent());
-            thread_groups[current] = ThreadGroup::createForMaterializedView();
+        auto parent_select_context = select_contexts.at(path.prevParent());
+        auto view_context = metadata->getSQLSecurityOverriddenContext(parent_select_context);
+        view_context->setQueryAccessInfo(parent_select_context->getQueryAccessInfoPtr());
+
+        select_queries[current] = live_view->getInnerQuery();
+        input_headers[current] = output_headers.at(path.prevParent());
+        select_contexts[current] = view_context;
+        insert_contexts[current] = view_context;
+        thread_groups[current] = ThreadGroup::createForMaterializedView();
+        view_types[current] = QueryViewsLogElement::ViewType::LIVE;
+
+        if (init_context->hasQueryContext())
+        {
+            init_context->getQueryContext()->addViewAccessInfo(init_table_id.getFullTableName());
+            init_context->getQueryContext()->addQueryAccessInfo(init_table_id, /*column_names=*/ {});
+        }
+
+        dependent_views[path.prevParent()].push_back(current);
+
+        return true;
+    }
+    else if (auto * window_view = dynamic_cast<StorageWindowView *>(init_storage.get()))
+    {
+        if (current == init_table_id)
+        {
             view_types[current] = QueryViewsLogElement::ViewType::WINDOW;
-
-            if (init_context->hasQueryContext())
-            {
-                init_context->getQueryContext()->addViewAccessInfo(init_table_id.getFullTableName());
-                init_context->getQueryContext()->addQueryAccessInfo(init_table_id, /*column_names=*/ {});
-            }
-
-            dependent_views[path.prevParent()].push_back(current);
-
+            root = {init_table_id, init_table_id};
             return true;
         }
-        else
+
+        auto parent_select_context = select_contexts.at(path.prevParent());
+        auto view_context = metadata->getSQLSecurityOverriddenContext(parent_select_context);
+        view_context->setQueryAccessInfo(parent_select_context->getQueryAccessInfoPtr());
+
+        select_queries[current] = window_view->getMergeableQuery();
+        select_contexts[current] = view_context;
+        insert_contexts[current] = view_context;
+        input_headers[current] = output_headers.at(path.prevParent());
+        thread_groups[current] = ThreadGroup::createForMaterializedView();
+        view_types[current] = QueryViewsLogElement::ViewType::WINDOW;
+
+        if (init_context->hasQueryContext())
         {
-            inner_tables[parent] = current;
+            init_context->getQueryContext()->addViewAccessInfo(init_table_id.getFullTableName());
+            init_context->getQueryContext()->addQueryAccessInfo(init_table_id, /*column_names=*/ {});
+        }
 
-            if (init_context->hasQueryContext())
+        dependent_views[path.prevParent()].push_back(current);
+
+        return true;
+    }
+    else
+    {
+        inner_tables[parent] = current;
+
+        if (init_context->hasQueryContext())
+        {
+            init_context->getQueryContext()->addQueryAccessInfo(current, /*column_names=*/ {});
+        }
+
+        if (current == init_table_id)
+        {
+            output_headers[{}] = metadata->getSampleBlock(); // InterpreterInsertQuery::getSampleBlockForInsertion(init_header.getNames(), storage, metadata, skip_destination_table, allow_materialized);
+            view_types[{}] = QueryViewsLogElement::ViewType::DEFAULT;
+            root = {{}, init_table_id};
+            return true;
+        }
+
+        if (parent == init_table_id)
+        {
+            root = {{init_table_id}, current};
+        }
+
+        const auto & view_id = path.parent();
+
+        // virtuals are allowed only for the first insertion
+        //bool allow_virtuals_ = false;
+        output_headers[view_id] = metadata->getSampleBlock(); // InterpreterInsertQuery::getSampleBlockForInsertion(select_headers.at(view_id).getNames(), storage, metadata, allow_virtuals_, allow_materialized);
+
+        // TODO: remove sql_security_type check after we turn `ignore_empty_sql_security_in_create_view_query=false`
+        auto view_storage = storages.at(view_id);
+        auto * m_view = dynamic_cast<StorageMaterializedView *>(view_storage.get());
+        chassert(m_view);
+        bool check_access = !m_view->hasInnerTable() && m_view->getInMemoryMetadataPtr()->sql_security_type;
+        if (check_access)
+        {
+            LOG_DEBUG(logger, "call checkAccess");
+            try
             {
-                init_context->getQueryContext()->addQueryAccessInfo(current, /*column_names=*/ {});
-            }
-
-            if (current == init_table_id)
-            {
-                select_queries[{}] = init_query->as<ASTInsertQuery>()->select;
-
-                select_contexts[{}] = init_context;
-                insert_contexts[{}] = init_context;
-
-                input_headers[{}] = init_header;
-                output_headers[{}] = metadata->getSampleBlock(); // InterpreterInsertQuery::getSampleBlockForInsertion(init_header.getNames(), storage, metadata, skip_destination_table, allow_materialized);
-
-                thread_groups[{}] = CurrentThread::getGroup();
-
-                view_types[{}] = QueryViewsLogElement::ViewType::DEFAULT;
-
-                dependent_views[{}] = {};
-
-                root = {{}, init_table_id};
-
-                return true;
-            }
-            else if (parent == init_table_id)
-            {
-                root = {{init_table_id}, current};
-            }
-
-            const auto & view_id = path.parent();
-
-            // virtuals are allowed only for the first insertion
-            //bool allow_virtuals_ = false;
-            output_headers[view_id] = metadata->getSampleBlock(); // InterpreterInsertQuery::getSampleBlockForInsertion(select_headers.at(view_id).getNames(), storage, metadata, allow_virtuals_, allow_materialized);
-
-            // TODO: remove sql_security_type check after we turn `ignore_empty_sql_security_in_create_view_query=false`
-            auto view_storage = storages.at(view_id);
-            auto * m_view = dynamic_cast<StorageMaterializedView *>(view_storage.get());
-            chassert(m_view);
-            bool check_access = !m_view->hasInnerTable() && m_view->getInMemoryMetadataPtr()->sql_security_type;
-            if (check_access)
-            {
-                LOG_DEBUG(logger, "call checkAccess");
                 insert_contexts.at(view_id)->checkAccess(AccessType::INSERT, current, metadata->getSampleBlockInsertable().getNames());
             }
+            catch (...)
+            {
+                if (!materialized_views_ignore_errors)
+                    throw;
 
-            dependent_views[path.prevPrevParent()].push_back(view_id);
+                auto exception = addStorageToException(std::current_exception(), view_id);
+                tryLogException(exception, getLogger("FinalizingViewsTransform"),
+                    "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.");
 
-            return true;
+                logQueryView(view_id, exception, /*before_start*/ true);
+                return false;
+            }
         }
-    };
+
+        dependent_views[path.prevPrevParent()].push_back(view_id);
+
+        return true;
+    }
+}
+
+
+void ViewsManager::buildRelaitions()
+{
+    LOG_DEBUG(logger, "buildRelaitions: {}", init_table_id);
+    LOG_DEBUG(logger, "init header {}", init_header.dumpStructure());
 
     VisitedPath path;
 
@@ -940,7 +934,7 @@ void ViewsManager::buildRelaitions()
              path.popBack();
         });
 
-        if (!register_path(path))
+        if (!registerPath(path))
             return;
 
         auto storage = storages.at(id);
@@ -1089,7 +1083,9 @@ Chain ViewsManager::createPreSink(StorageIDPrivate view_id) const
 
     LOG_DEBUG(logger, "createPreSink: {}, table id {}", view_id, table_id);
 
+    LOG_DEBUG(logger, "createPreSink: {}, table id {} has storage {}", view_id, table_id, storages.contains(table_id));
     auto storage = storages.at(table_id);
+    LOG_DEBUG(logger, "createPreSink: {}, table id {} has metadata {}", view_id, table_id, metadata_snapshots.contains(table_id));
     auto metadata = metadata_snapshots.at(table_id);
 
     LOG_DEBUG(logger, "createPreSink: {}, table id {} has output_headers {}", view_id, table_id, output_headers.contains(view_id));
@@ -1346,7 +1342,7 @@ String getCleanQueryAst(const ASTPtr q, ContextPtr context)
 }
 
 
-void ViewsManager::logQueryView(StorageID view_id, std::exception_ptr exception) const
+void ViewsManager::logQueryView(StorageID view_id, std::exception_ptr exception, bool before_start) const
 {
     LOG_DEBUG(logger, "logQueryView {}", view_id);
 
@@ -1357,7 +1353,7 @@ void ViewsManager::logQueryView(StorageID view_id, std::exception_ptr exception)
         return;
     }
 
-    auto event_status = exception ? QueryViewsLogElement::ViewStatus::EXCEPTION_WHILE_PROCESSING : QueryViewsLogElement::ViewStatus::QUERY_FINISH;
+    auto event_status = getQueryViewStatus(exception, before_start);
     if (event_status < settings[Setting::log_queries_min_type])
     {
         LOG_DEBUG(logger, "logQueryView {} not added, event_status {}", view_id, event_status);
@@ -1450,6 +1446,18 @@ void ViewsManager::VisitedPath::popBack()
 String ViewsManager::VisitedPath::debugString() const
 {
     return fmt::format("{}", fmt::join(path, " :-> "));
+}
+
+
+QueryViewsLogElement::ViewStatus ViewsManager::getQueryViewStatus(std::exception_ptr exception, bool before_start)
+{
+    if (before_start)
+        return QueryViewsLogElement::ViewStatus::EXCEPTION_BEFORE_START;
+
+    if (exception)
+        return QueryViewsLogElement::ViewStatus::EXCEPTION_WHILE_PROCESSING;
+
+    return QueryViewsLogElement::ViewStatus::QUERY_FINISH;
 }
 
 }

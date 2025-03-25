@@ -110,12 +110,15 @@ public:
     Chain createPostSink() const;
     Chain createRetry(VisitedPath path);
 
-    void logQueryView(StorageID view_id, std::exception_ptr exception) const;
+    static QueryViewsLogElement::ViewStatus getQueryViewStatus(std::exception_ptr exception, bool before_start);
+
+    void logQueryView(StorageID view_id, std::exception_ptr exception, bool before_start = false) const;
 
 protected:
     ViewsManager(StoragePtr table, ASTPtr query, Block insert_header, bool async_insert_, bool skip_destination_table_, bool allow_materialized_, ContextPtr context);
 
 private:
+    bool registerPath(VisitedPath path);
     void buildRelaitions();
     Chain createSelect(StorageIDPrivate view_id) const;
     Chain createPreSink(StorageIDPrivate view_id) const;

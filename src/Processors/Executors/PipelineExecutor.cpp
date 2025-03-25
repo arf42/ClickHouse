@@ -110,11 +110,7 @@ void PipelineExecutor::cancelReading()
 
 void PipelineExecutor::finish()
 {
-    LOG_DEBUG(log, "finish begin");
-
     tasks.finish();
-
-    LOG_DEBUG(log, "finish end");
 }
 
 bool PipelineExecutor::tryUpdateExecutionStatus(ExecutionStatus expected, ExecutionStatus desired)
@@ -196,8 +192,6 @@ bool PipelineExecutor::checkTimeLimitSoft()
     {
         bool continuing = process_list_element->checkTimeLimitSoft();
 
-        LOG_DEBUG(log, "checkTimeLimitSoft continuing {}", continuing);
-
         // We call cancel here so that all processors are notified and tasks waken up
         // so that the "break" is faster and doesn't wait for long events
         if (!continuing)
@@ -213,8 +207,6 @@ bool PipelineExecutor::checkTimeLimit()
 {
     bool continuing = checkTimeLimitSoft();
 
-    LOG_DEBUG(log, "checkTimeLimit at continuing {}", continuing);
-
     if (!continuing)
         process_list_element->checkTimeLimit(); // Will throw if needed
 
@@ -228,8 +220,6 @@ void PipelineExecutor::setReadProgressCallback(ReadProgressCallbackPtr callback)
 
 void PipelineExecutor::finalizeExecution()
 {
-    LOG_DEBUG(log, "finalizeExecution begin  execution_status: {} at {}",  execution_status.load(), StackTrace().toString());
-
     checkTimeLimit();
 
     auto status = execution_status.load();
@@ -445,8 +435,6 @@ void PipelineExecutor::spawnThreadsImpl()
 void PipelineExecutor::executeImpl(size_t num_threads, bool concurrency_control)
 {
     initializeExecution(num_threads, concurrency_control);
-
-    LOG_DEBUG(log, "execute with {}", num_threads);
 
     try
     {
