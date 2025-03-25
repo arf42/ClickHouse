@@ -54,6 +54,7 @@
 #include <Common/SensitiveDataMasker.h>
 #include <Common/logger_useful.h>
 #include "Core/Block.h"
+#include "Core/LogsLevel.h"
 #include "IO/WriteBufferFromString.h"
 #include "Interpreters/StorageID.h"
 #include "Processors/Chunk.h"
@@ -321,10 +322,14 @@ public:
 
             if (!views_manager->materialized_views_ignore_errors)
             {
-                tryLogException(status.exception, getLogger("FinalizingViewsTransform"),
-                    "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.");
                 return Status::Ready;
             }
+
+            tryLogException(
+                status.exception,
+                getLogger("FinalizingViewsTransform"),
+                "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.",
+                LogsLevel::warning);
 
             input.setNeeded();
             return Status::NeedData;
@@ -672,7 +677,7 @@ bool ViewsManager::registerPath(VisitedPath path)
         {
             if (init_context->getSettingsRef()[Setting::ignore_materialized_views_with_dropped_target_table])
             {
-                LOG_ERROR(getLogger("FinalizingViewsTransform"),
+                LOG_WARNING(getLogger("FinalizingViewsTransform"),
                     "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled. Target table '{}' of view '{}' doesn't exists.", current, parent);
                 return false;
             }
@@ -909,8 +914,11 @@ bool ViewsManager::registerPath(VisitedPath path)
                     throw;
 
                 auto exception = addStorageToException(std::current_exception(), view_id);
-                tryLogException(exception, getLogger("FinalizingViewsTransform"),
-                    "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.");
+                tryLogException(
+                    exception,
+                    getLogger("FinalizingViewsTransform"),
+                    "Cannot push to the storage. Error is ignored because the setting materialized_views_ignore_errors is enabled.",
+                    LogsLevel::warning);
 
                 logQueryView(view_id, exception, /*before_start*/ true);
                 return false;

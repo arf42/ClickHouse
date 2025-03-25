@@ -959,11 +959,6 @@ bool TCPHandler::receivePacketsExpectData(QueryState & state)
             }
         }
 
-        /// it is OK to get EOF when server tries to skip the data in case of exception.
-        /// Server has send exception or EOF to the client, client is able not to send any data after that.
-        if (state.skipping_data && !in->hasPendingData())
-            return false;
-
         UInt64 packet_type = 0;
         readVarUInt(packet_type, *in);
 
@@ -1037,7 +1032,7 @@ void TCPHandler::skipData(QueryState & state)
     size_t blocks = 0;
     while (receivePacketsExpectData(state))
         ++blocks;
-    LOG_TRACE(log, "Discarded {} blocks", blocks);
+    LOG_DEBUG(log, "Discarded {} blocks", blocks);
 }
 
 
