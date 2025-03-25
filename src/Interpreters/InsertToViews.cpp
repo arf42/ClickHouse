@@ -705,17 +705,16 @@ bool ViewsManager::registerPath(VisitedPath path)
 
     LOG_DEBUG(logger, "3");
 
-    if (current == init_table_id)
+    auto set_defaults = [&] (const StorageIDPrivate & root_view)
     {
-        LOG_DEBUG(logger, "33");
-
-        select_queries[{}] = init_query->as<ASTInsertQuery>()->select;
-        select_contexts[{}] = init_context;
-        insert_contexts[{}] = init_context;
-        input_headers[{}] = init_header;
-        thread_groups[{}] = CurrentThread::getGroup();
-        dependent_views[{}] = {};
-    }
+        LOG_DEBUG(logger, "set defaults for {}", root_view);
+        select_queries[root_view] = init_query->as<ASTInsertQuery>()->select;
+        select_contexts[root_view] = init_context;
+        insert_contexts[root_view] = init_context;
+        input_headers[root_view] = init_header;
+        thread_groups[root_view] = CurrentThread::getGroup();
+        dependent_views[root_view] = {};
+    };
 
     LOG_DEBUG(logger, "4");
 
@@ -724,6 +723,8 @@ bool ViewsManager::registerPath(VisitedPath path)
     {
         if (current == init_table_id)
         {
+            set_defaults(current);
+
             LOG_DEBUG(logger, "66");
             view_types[current] = QueryViewsLogElement::ViewType::MATERIALIZED;
             // root is filled at next call register_path
@@ -803,6 +804,7 @@ bool ViewsManager::registerPath(VisitedPath path)
     {
         if (current == init_table_id)
         {
+            set_defaults(current);
             view_types[current] = QueryViewsLogElement::ViewType::LIVE;
             root = {init_table_id, init_table_id};
             return true;
@@ -833,6 +835,7 @@ bool ViewsManager::registerPath(VisitedPath path)
     {
         if (current == init_table_id)
         {
+            set_defaults(current);
             view_types[current] = QueryViewsLogElement::ViewType::WINDOW;
             root = {init_table_id, init_table_id};
             return true;
@@ -870,6 +873,7 @@ bool ViewsManager::registerPath(VisitedPath path)
 
         if (current == init_table_id)
         {
+            set_defaults({});
             output_headers[{}] = metadata->getSampleBlock(); // InterpreterInsertQuery::getSampleBlockForInsertion(init_header.getNames(), storage, metadata, skip_destination_table, allow_materialized);
             view_types[{}] = QueryViewsLogElement::ViewType::DEFAULT;
             root = {{}, init_table_id};
@@ -1089,10 +1093,13 @@ Chain ViewsManager::createPreSink(StorageIDPrivate view_id) const
     auto metadata = metadata_snapshots.at(table_id);
 
     LOG_DEBUG(logger, "createPreSink: {}, table id {} has output_headers {}", view_id, table_id, output_headers.contains(view_id));
-
     auto output_header = output_headers.at(view_id);
 
+    LOG_DEBUG(logger, "createPreSink: {}, table id {} has insert_contexts {}", view_id, table_id, insert_contexts.contains(view_id));
     auto insert_context = insert_contexts.at(view_id);
+
+    LOG_DEBUG(logger, "createPreSink: {}, has input_headers {}", view_id, input_headers.contains(view_id));
+
 
     //auto header = InterpreterInsertQuery::getSampleBlock() ;//(const ASTInsertQuery &query, const StoragePtr &table, const StorageMetadataPtr &metadata_snapshot, ContextPtr context_)
 
@@ -1167,12 +1174,6 @@ Chain ViewsManager::createPreSink(StorageIDPrivate view_id) const
     /// NOTE It'd better to do this check in serialization of nested structures (in place when this assumption is required),
     /// but currently we don't have methods for serialization of nested structures "as a whole".
     chain.addSink(std::make_shared<NestedElementsValidationTransform>(output_header));
-
-    LOG_DEBUG(logger, "createPreSink: {}, input_header {}", view_id, input_headers.at(view_id).dumpStructure());
-
-    LOG_DEBUG(logger, "createPreSink: {}, metadata_header {}", view_id, metadata->getSampleBlock().dumpStructure());
-    LOG_DEBUG(logger, "createPreSink: {}, output_headers {}", view_id, output_header.dumpStructure());
-
 
     LOG_DEBUG(logger, "createPreSink: {}, input {}, output {}", view_id, chain.getInputHeader().dumpStructure(), chain.getOutputHeader().dumpStructure());
 
