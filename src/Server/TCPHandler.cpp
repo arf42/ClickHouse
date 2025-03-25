@@ -1202,11 +1202,13 @@ void TCPHandler::processInsertQuery(QueryState & state)
 
     if (num_threads > 1)
     {
+            LOG_DEBUG(log, "PushingAsyncPipelineExecutor");
         PushingAsyncPipelineExecutor executor(state.io.pipeline);
         run_executor(executor, std::move(processed_block));
     }
     else
     {
+        LOG_DEBUG(log, "PushingPipelineExecutor");
         PushingPipelineExecutor executor(state.io.pipeline);
         run_executor(executor, std::move(processed_block));
     }
