@@ -646,7 +646,7 @@ QueryPipeline InterpreterInsertQuery::buildInsertPipeline(ASTInsertQuery & query
 
     QueryPipeline pipeline = QueryPipeline(std::move(chain));
 
-    auto max_insert_threads = std::max<size_t>(1, std::max<size_t>(settings[Setting::max_threads], settings[Setting::max_insert_threads]));
+    auto max_insert_threads = std::max<size_t>(static_cast<size_t>(1) , std::max<size_t>(settings[Setting::max_threads], settings[Setting::max_insert_threads]));
     LOG_DEBUG(getLogger("InterpreterInsertQuery"), "set num thread at {}", max_insert_threads);
     pipeline.setNumThreads(max_insert_threads);
     pipeline.setConcurrencyControl(settings[Setting::use_concurrency_control]);

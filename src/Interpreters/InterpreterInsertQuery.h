@@ -57,7 +57,7 @@ public:
       const Names & names,
       const StoragePtr & table,
       const StorageMetadataPtr & metadata_snapshot,
-      bool no_destination,
+      bool allow_virtuals,
       bool allow_materialized);
 
     // static Block getSampleBlockForInsertion(

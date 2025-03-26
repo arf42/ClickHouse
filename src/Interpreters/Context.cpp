@@ -2167,7 +2167,7 @@ void Context::addQueryAccessInfo(
     const StorageID & table_id,
     const Names & column_names)
 {
-    return addQueryAccessInfo(backQuoteIfNeed(table_id.getDatabaseName()), table_id.getFullTableName(), column_names);
+    addQueryAccessInfo(backQuoteIfNeed(table_id.getDatabaseName()), table_id.getFullTableName(), column_names);
 }
 
 void Context::addQueryAccessInfo(

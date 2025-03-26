@@ -1309,7 +1309,7 @@ Chain ViewsManager::createPostSink(StorageIDPrivate view_id, size_t level) const
 
 
     auto copying_data = std::make_shared<CopyTransform>(output_headers.at(view_id), dependent_views_ids.size());
-    auto finalizing_views = std::make_shared<FinalizingViewsTransform>(std::move(output_view_chains_headers), std::move(dependent_views_ids), shared_from_this());
+    auto finalizing_views = std::make_shared<FinalizingViewsTransform>(std::move(output_view_chains_headers), dependent_views_ids, shared_from_this());
     auto out = copying_data->getOutputs().begin();
     auto in = finalizing_views->getInputs().begin();
 

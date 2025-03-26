@@ -622,7 +622,7 @@ StorageURLSink::StorageURLSink(
     const ConnectionTimeouts & timeouts_,
     const CompressionMethod & compression_method_,
     HTTPHeaderEntries headers_,
-    String http_method_)
+    String method)
     : SinkToStorage(sample_block)
     , uri(std::move(uri_))
     , format(std::move(format_))
@@ -631,7 +631,7 @@ StorageURLSink::StorageURLSink(
     , timeouts(timeouts_)
     , compression_method(compression_method_)
     , headers(std::move(headers_))
-    , http_method(std::move(http_method_))
+    , http_method(std::move(method))
 
 {
 }
