@@ -190,7 +190,10 @@ void PushingAsyncPipelineExecutor::push(Chunk chunk)
         start();
 
     if (data->is_finished)
+    {
+        data->rethrowExceptionIfHas();
         throwOnExecutionStatus(data->executor->getExecutionStatus());
+    }
 
     bool is_pushed = pushing_source->setData(std::move(chunk));
     data->rethrowExceptionIfHas();

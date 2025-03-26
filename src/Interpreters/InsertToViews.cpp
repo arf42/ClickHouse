@@ -690,7 +690,6 @@ bool ViewsManager::registerPath(VisitedPath path)
 
         UNREACHABLE();
     }
-    LOG_DEBUG(logger, "1");
 
     auto lock = storage->tryLockForShare(init_context->getInitialQueryId(), init_context->getSettingsRef()[Setting::lock_acquire_timeout]);
     if (lock == nullptr)
@@ -701,14 +700,11 @@ bool ViewsManager::registerPath(VisitedPath path)
         return false;
     }
 
-    LOG_DEBUG(logger, "2");
     auto metadata = storage->getInMemoryMetadataPtr();
 
     storages[current] = storage;
     metadata_snapshots[current] = metadata;
     storage_locks[current] = std::move(lock);
-
-    LOG_DEBUG(logger, "3");
 
     auto set_defaults = [&] (const StorageIDPrivate & root_view)
     {
@@ -721,22 +717,15 @@ bool ViewsManager::registerPath(VisitedPath path)
         dependent_views[root_view] = {};
     };
 
-    LOG_DEBUG(logger, "4");
-
-
     if (dynamic_cast<StorageMaterializedView *>(storage.get()))
     {
         if (current == init_table_id)
         {
             set_defaults(current);
-
-            LOG_DEBUG(logger, "66");
             view_types[current] = QueryViewsLogElement::ViewType::MATERIALIZED;
             // root is filled at next call register_path
             return true;
         }
-
-        LOG_DEBUG(logger, "7");
 
         const auto & select_table_id = metadata->getSelectQuery().select_table_id;
         if (select_table_id != path.parent())
@@ -757,8 +746,6 @@ bool ViewsManager::registerPath(VisitedPath path)
         // else
         //     select_header = InterpreterSelectQuery(select_query, select_context, SelectQueryOptions().ignoreAccessCheck()).getSampleBlock();
 
-        LOG_DEBUG(logger, "8");
-
         select_queries[current] = select_query;
         input_headers[current] = output_headers.at(path.prevParent());
 
@@ -769,14 +756,10 @@ bool ViewsManager::registerPath(VisitedPath path)
         // be no parallel reading after (plus it is not a costless operation)
         select_context->setSetting("parallelize_output_from_storages", Field{false});
 
-        LOG_DEBUG(logger, "9");
-
         auto insert_context = Context::createCopy(select_context);
         insert_context->setQueryAccessInfo(parent_select_context->getQueryAccessInfoPtr());
         if (!deduplicate_blocks_in_dependent_materialized_views)
             insert_context->setSetting("insert_deduplicate", Field{false});
-
-        LOG_DEBUG(logger, "10");
 
         const auto & insert_settings = insert_context->getSettingsRef();
         // Separate min_insert_block_size_rows/min_insert_block_size_bytes for children
