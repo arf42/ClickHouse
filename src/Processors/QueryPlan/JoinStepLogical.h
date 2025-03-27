@@ -5,6 +5,7 @@
 #include <Processors/QueryPlan/ITransformingStep.h>
 #include <Processors/QueryPlan/JoinStep.h>
 #include <Processors/QueryPlan/SortingStep.h>
+#include <Common/SafePtr.h>
 
 namespace DB
 {

@@ -8,6 +8,7 @@
 #include <Analyzer/IQueryTreeNode.h>
 #include <Interpreters/ActionsDAG.h>
 #include <Core/Settings.h>
+#include <Common/SafePtr.h>
 
 #include <QueryPipeline/SizeLimits.h>
 
@@ -76,7 +77,7 @@ inline PredicateOperator reversePredicateOperator(PredicateOperator op)
     }
 }
 
-using ActionsDAGPtr = std::unique_ptr<ActionsDAG>;
+using ActionsDAGPtr = SafeUniquePtr<ActionsDAG>;
 
 class JoinActionRef
 {

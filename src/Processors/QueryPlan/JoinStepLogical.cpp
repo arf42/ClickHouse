@@ -498,6 +498,9 @@ void addRequiredInputToOutput(ActionsDAG * dag, const NameSet & required_output_
 
 struct JoinPlanningContext
 {
+    BaseRelsSet left_rels;
+    BaseRelsSet right_rels;
+
     std::shared_ptr<TableJoin> table_join;
 
     JoinSettings & join_settings;
@@ -524,6 +527,22 @@ void predicateOperandsToCommonType(JoinPredicate & predicate, const JoinPlanning
 {
     auto & left_node = predicate.left_node;
     auto & right_node = predicate.right_node;
+
+    if (left_node.canBeCalculated(join_context.left_rels) && right_node.canBeCalculated(join_context.right_rels))
+    {
+        /// ok
+    }
+    else if (left_node.canBeCalculated(join_context.right_rels) && right_node.canBeCalculated(join_context.left_rels))
+    {
+        std::swap(left_node, right_node);
+    }
+    else
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Join condition operands cannot be calculated: {} and {} while joining tables {} and {}",
+            left_node.getColumnName(), right_node.getColumnName(),
+            join_context.left_rels.to_ullong(), join_context.right_rels.to_ullong());
+    }
+
     const auto & left_type = left_node.getType();
     const auto & right_type = right_node.getType();
 
@@ -558,7 +577,7 @@ void predicateOperandsToCommonType(JoinPredicate & predicate, const JoinPlanning
     }
 }
 
-bool addJoinConditionToTableJoin(JoinCondition & join_condition, TableJoin::JoinOnClause & table_join_clause, ActionsDAG * post_join_actions, const JoinPlanningContext & join_context)
+bool addJoinPredicateToTableJoin(JoinCondition & join_condition, TableJoin::JoinOnClause & table_join_clause, ActionsDAG * post_join_actions, const JoinPlanningContext & join_context)
 {
     std::vector<JoinPredicate> new_predicates;
     for (size_t i = 0; i < join_condition.predicates.size(); ++i)
@@ -741,24 +760,20 @@ void buildPhysicalJoinNode(
     if ((left_rels & right_rels).any())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Left and right tables are intersected: {} <-> {}", left_rels.to_ullong(), right_rels.to_ullong());
 
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: JOINIGN: [{}] <-> [{}]", __FILE__, __LINE__,
-        fmt::join(bitsetToPositions(result_node.left_child), ","),
-        fmt::join(bitsetToPositions(result_node.right_child), ","));
+    join_context.left_rels = left_rels;
+    join_context.right_rels = right_rels;
 
     auto * post_join_actions = result_node.actions.get();
-    auto * left_pre_join_actions = join_tree.at(result_node.left_child).actions.get();
-    auto * right_pre_join_actions = join_tree.at(result_node.right_child).actions.get();
+    auto * left_pre_join_actions = join_tree.at(left_rels).actions.get();
+    auto * right_pre_join_actions = join_tree.at(right_rels).actions.get();
 
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > post_join_actions\n{}", __FILE__, __LINE__, post_join_actions->dumpDAG());
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > left_pre_join_actions\n{}", __FILE__, __LINE__, left_pre_join_actions->dumpDAG());
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: > right_pre_join_actions\n{}", __FILE__, __LINE__, right_pre_join_actions->dumpDAG());
     forEachJoinAction(join_info.expression, [&](JoinActionRef & action)
     {
-        if (action.canBeCalculated(result_node.left_child))
+        if (action.canBeCalculated(left_rels))
             action.setActions(left_pre_join_actions);
-        else if (action.canBeCalculated(result_node.right_child))
+        else if (action.canBeCalculated(right_rels))
             action.setActions(right_pre_join_actions);
-        else if (action.canBeCalculated(result_node.left_child | result_node.right_child))
+        else if (action.canBeCalculated(left_rels | right_rels))
             action.setActions(post_join_actions);
         else
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot determine actions for JoinActionRef {}", action.getColumnName());
@@ -769,18 +784,15 @@ void buildPhysicalJoinNode(
         if (!actions)
             continue;
         ActionsDAG * join_actions = nullptr;
-        if (isSubsetOf(src, result_node.left_child))
+        if (isSubsetOf(src, left_rels))
             join_actions = left_pre_join_actions;
-        else if (isSubsetOf(src, result_node.right_child))
+        else if (isSubsetOf(src, right_rels))
             join_actions = right_pre_join_actions;
-        else if (isSubsetOf(src, result_node.left_child | result_node.right_child))
+        else if (isSubsetOf(src, left_rels | right_rels))
             join_actions = post_join_actions;
         else
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot determine actions source: left {}, right{}, actions {} {}",
-                result_node.left_child.to_ullong(), result_node.right_child.to_ullong(), src.to_ullong(), actions->dumpNames());
-        LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: merge inplase\n{}", __FILE__, __LINE__, join_actions->dumpDAG());
-        LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: from\n{}", __FILE__, __LINE__, actions->dumpDAG());
-
+                left_rels.to_ullong(), right_rels.to_ullong(), src.to_ullong(), actions->dumpNames());
 
         ActionsDAG::NodeRawConstPtrs new_outputs;
         join_actions->mergeNodes(std::move(*actions), &new_outputs);
@@ -794,10 +806,6 @@ void buildPhysicalJoinNode(
     }
     join_info.expression_actions.actions.clear();
 
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> post_join_actions\n{}", __FILE__, __LINE__, post_join_actions->dumpDAG());
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> left_pre_join_actions\n{}", __FILE__, __LINE__, left_pre_join_actions->dumpDAG());
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{}: >>> right_pre_join_actions\n{}", __FILE__, __LINE__, right_pre_join_actions->dumpDAG());
-
     auto & join_expression = join_info.expression;
     auto & table_join = join_context.table_join;
 
@@ -808,7 +816,7 @@ void buildPhysicalJoinNode(
 
     if (!isCrossOrComma(join_info.kind) && !isPaste(join_info.kind))
     {
-        bool has_keys = addJoinConditionToTableJoin(
+        bool has_keys = addJoinPredicateToTableJoin(
             join_expression.condition, table_join_clauses.emplace_back(),
             post_join_actions, join_context);
 
@@ -870,7 +878,7 @@ void buildPhysicalJoinNode(
     for (auto & join_condition : join_expression.disjunctive_conditions)
     {
         auto & table_join_clause = table_join_clauses.emplace_back();
-        bool has_keys = addJoinConditionToTableJoin(join_condition, table_join_clause, post_join_actions, join_context);
+        bool has_keys = addJoinPredicateToTableJoin(join_condition, table_join_clause, post_join_actions, join_context);
         if (!has_keys)
             throw Exception(ErrorCodes::INVALID_JOIN_ON_EXPRESSION, "Cannot determine join keys in JOIN ON expression {}",
                 formatJoinCondition(join_condition));
@@ -982,13 +990,6 @@ void buildPhysicalJoinNode(
     Block left_sample_block = blockWithColumns(left_pre_join_actions->getResultColumns());
     Block right_sample_block = blockWithColumns(right_pre_join_actions->getResultColumns());
 
-    // if (swap_inputs)
-    // {
-    //     table_join->swapSides();
-    //     std::swap(left_sample_block, right_sample_block);
-    //     std::swap(hash_table_key_hash_left, hash_table_key_hash_right);
-    // }
-
     JoinAlgorithmSettings algo_settings(
         join_context.join_settings,
         join_context.max_threads,
@@ -1018,7 +1019,7 @@ static size_t getSingleBit(BaseRelsSet set)
 }
 
 
-std::vector<JoinStepLogical::PhysicalJoinNode> buildOperationStack(
+std::vector<JoinStepLogical::PhysicalJoinNode> joinTreeToDFSSequence(
     BaseRelsSet root, std::unordered_map<BaseRelsSet, JoinStepLogical::PhysicalJoinNode> tree)
 {
     std::vector<JoinStepLogical::PhysicalJoinNode> nodes;
@@ -1051,6 +1052,22 @@ std::vector<JoinStepLogical::PhysicalJoinNode> buildOperationStack(
     return nodes;
 }
 
+std::string toStringOmitZeroPrefix(BaseRelsSet s)
+{
+    std::string result = s.to_string();
+    result.erase(0, result.find_first_not_of('0'));
+    if (result.empty())
+        result = "0";
+    return result;
+}
+
+BaseRelsSet singleRelationSet(size_t idx)
+{
+    BaseRelsSet set;
+    set.set(idx);
+    return set;
+}
+
 std::vector<JoinStepLogical::PhysicalJoinNode>
 JoinStepLogical::convertToPhysical(
     bool is_explain_logical,
@@ -1062,6 +1079,7 @@ JoinStepLogical::convertToPhysical(
 {
     size_t num_tables = getNumberOfTables();
     std::vector<JoinEdge> join_order;
+
     for (size_t i = 0; i < join_operators.size(); ++i)
     {
         UInt64 rhs = 1u << (i + 1);
@@ -1103,7 +1121,7 @@ JoinStepLogical::convertToPhysical(
         ColumnsWithTypeAndName current_step_inputs;
         for (auto child : {join_edge.lhs, join_edge.rhs})
         {
-            for (const auto * col : tree[child].actions->getOutputs())
+            for (const auto * col : tree.at(child).actions->getOutputs())
             {
                 if (required_output_columns.contains(col->result_name))
                 {
@@ -1115,6 +1133,7 @@ JoinStepLogical::convertToPhysical(
                 }
             }
         }
+
         physical_node.actions = std::make_unique<ActionsDAG>(current_step_inputs);
 
         auto table_join = std::make_shared<TableJoin>(join_settings, use_nulls,
@@ -1122,6 +1141,8 @@ JoinStepLogical::convertToPhysical(
             Context::getGlobalContextInstance()->getTempDataOnDisk());
 
         JoinPlanningContext join_context{
+            join_edge.lhs,
+            join_edge.rhs,
             table_join,
             join_settings,
             sorting_settings,
@@ -1152,7 +1173,7 @@ JoinStepLogical::convertToPhysical(
         buildPhysicalJoinNode(physical_node, tree, join_edge.join_operator, join_context, is_explain_logical);
     }
 
-    return buildOperationStack(BaseRelsSet((1u << num_tables) - 1), std::move(tree));
+    return joinTreeToDFSSequence(BaseRelsSet((1u << num_tables) - 1), std::move(tree));
 }
 
 bool JoinStepLogical::hasPreparedJoinStorage() const
