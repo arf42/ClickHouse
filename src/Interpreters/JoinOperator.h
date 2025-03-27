@@ -64,7 +64,7 @@ inline std::optional<PredicateOperator> getJoinPredicateOperator(const String & 
     return {};
 }
 
-inline PredicateOperator reversePredicateOperator(PredicateOperator op)
+inline PredicateOperator flipPredicateOperator(PredicateOperator op)
 {
     switch (op)
     {

@@ -535,6 +535,7 @@ void predicateOperandsToCommonType(JoinPredicate & predicate, const JoinPlanning
     else if (left_node.canBeCalculated(join_context.right_rels) && right_node.canBeCalculated(join_context.left_rels))
     {
         std::swap(left_node, right_node);
+        predicate.op = flipPredicateOperator(predicate.op);
     }
     else
     {
@@ -985,7 +986,7 @@ void buildPhysicalJoinNode(
         left_pre_join_actions->getNamesAndTypesList(),
         right_pre_join_actions->getNamesAndTypesList());
     table_join->setUsedColumns(post_join_actions->getRequiredColumnsNames());
-    table_join->setJoinInfo(join_info);
+    table_join->setJoinOperator(join_info);
 
     Block left_sample_block = blockWithColumns(left_pre_join_actions->getResultColumns());
     Block right_sample_block = blockWithColumns(right_pre_join_actions->getResultColumns());
@@ -1190,6 +1191,8 @@ bool JoinStepLogical::canFlatten() const
     if (prepared_join_storage)
         return false;
     if (getNumberOfTables() >= BaseRelsSet().size())
+        return false;
+    if (join_operators.at(0).expression.is_using)
         return false;
     return true;
 }
